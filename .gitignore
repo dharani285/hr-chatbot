@@ -1,0 +1,18 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python build, cache, and virtual environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local application data and generated output
+artifacts/
+HR_documents/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
