@@ -1,19 +1,23 @@
 import os
 import sys
-import textwrap
-from typing import List
 
-import google.generativeai as genai
+from groq import Groq
 from dotenv import load_dotenv
 
 from retrieve import search
 
-# Prompt template: concise, instruction-focused
+
+# Load environment variables from .env
+load_dotenv()
+
+
+# System instructions for the HR chatbot
 SYSTEM_PROMPT = (
     "You are an HR assistant. Answer strictly based on the provided context.\n"
-    "-If user greets you, greet them back in friendly manner.\n"
+    "- If the user greets you, greet them back in a friendly manner.\n"
     "- If the answer is not in the context, say you don't know.\n"
-    "- Be concise and clear.\n"
+    "- Never invent HR policies or company information.\n"
+    "- Be concise, clear, and professional.\n"
 )
 
 USER_PROMPT_TEMPLATE = (
@@ -24,101 +28,137 @@ USER_PROMPT_TEMPLATE = (
 
 
 def format_context(results) -> str:
-    """Format search results into a readable context string for prompting.
+    """
+    Format retrieved document chunks into context for the LLM.
 
     Args:
-        results: Iterable of tuples ``(score: float, chunk: str, md: dict)``
-            from the retriever. ``md`` is expected to include ``doc_id`` and
-            ``chunk_id`` keys.
+        results: Iterable of tuples (score, chunk, metadata).
 
     Returns:
-        A single string where each chunk is preceded by a header containing
-        source document info and similarity score, with blocks separated by
-        a blank line.
+        Formatted context string.
     """
     ctx_blocks = []
+
     for score, chunk, md in results:
-        header = f"[source: {md['doc_id']} | chunk: {md['chunk_id']} | score: {score:.3f}]"
+        header = (
+            f"[source: {md.get('doc_id', 'unknown')} | "
+            f"chunk: {md.get('chunk_id', -1)} | "
+            f"score: {score:.3f}]"
+        )
+
         ctx_blocks.append(f"{header}\n{chunk}")
+
     return "\n\n".join(ctx_blocks)
 
 
 def generate_answer(question: str, context: str) -> str:
-    """Generate a concise answer from the Gemini model using retrieved context.
-
-    Loads the API key from the environment (via ``.env``), builds a
-    constrained prompt with system guidance and the provided context, and
-    returns the model's text output.
+    """
+    Generate an HR answer using a Groq-hosted language model.
 
     Args:
-        question: The user's question to answer.
-        context: The formatted context string produced by ``format_context``.
+        question: User's question.
+        context: Relevant HR document context.
 
     Returns:
-        The model response text. If the response has no direct ``text`` field,
-        attempts to assemble text from candidates. Falls back to
-        "(No response)" if nothing is available.
+        Generated answer.
 
     Raises:
-        RuntimeError: If ``GEMINI_API_KEY`` is not set in the environment/.env.
+        RuntimeError: If GROQ_API_KEY is missing.
     """
     load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
+
+    api_key = os.getenv("GROQ_API_KEY")
+    model_name = os.getenv(
+        "GROQ_MODEL",
+        "llama-3.3-70b-versatile"
+    )
+
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY missing in environment/.env")
+        raise RuntimeError(
+            "GROQ_API_KEY missing in environment/.env"
+        )
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash") # gemini-2.0-flash 
+    client = Groq(api_key=api_key)
 
-    prompt = SYSTEM_PROMPT + "\n\n" + USER_PROMPT_TEMPLATE.format(question=question, context=context)
-    resp = model.generate_content(prompt)
-    # Handle candidates safely
-    text = getattr(resp, "text", None)
-    if not text and hasattr(resp, "candidates") and resp.candidates:
-        parts = []
-        for c in resp.candidates:
-            if c.content and c.content.parts:
-                parts.extend([getattr(p, "text", "") for p in c.content.parts])
-        text = "\n".join([t for t in parts if t])
-    return text or "(No response)"
+    user_prompt = USER_PROMPT_TEMPLATE.format(
+        question=question,
+        context=context
+    )
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ],
+        temperature=0.2,
+        max_tokens=1024
+    )
+
+    answer = response.choices[0].message.content
+
+    return answer.strip() if answer else "(No response)"
 
 
 def main():
-    """Entry point for the RAG-based HR chatbot CLI.
-
-    - One-shot mode: pass a question as CLI arguments to get a single answer.
-    - Interactive mode: prompts repeatedly until the user enters 'exit'/'quit',
-      sends EOF, or interrupts with the keyboard.
     """
-    # Chat-like CLI: interactive loop; also supports one-shot if args provided
+    Run the HR RAG chatbot in one-shot or interactive CLI mode.
+    """
+
+    # One-shot mode:
+    # python -m src.cli What is the leave policy?
     if len(sys.argv) >= 2:
         question = " ".join(sys.argv[1:]).strip()
+
         if question.lower() in {"exit", "quit"}:
             print("Bye!")
             return
+
         results = search(question, k=5)
         context = format_context(results)
+
         answer = generate_answer(question, context)
+
         print("\nBot:\n" + answer)
         return
 
-    print("HR RAG Chatbot\nType your question below. Type 'exit' or 'quit' to end.\n")
+    # Interactive mode
+    print(
+        "HR RAG Chatbot using Groq\n"
+        "Type your question below. Type 'exit' or 'quit' to end.\n"
+    )
+
     while True:
         try:
-            user_inp = input("You: ").strip()
+            user_input = input("You: ").strip()
+
         except (KeyboardInterrupt, EOFError):
             print("\nBye!")
             break
-        if not user_inp:
+
+        if not user_input:
             continue
-        if user_inp.lower() in {"exit", "quit"}:
+
+        if user_input.lower() in {"exit", "quit"}:
             print("Bye!")
             break
 
-        results = search(user_inp, k=5)
-        context = format_context(results)
-        answer = generate_answer(user_inp, context)
-        print("Bot:\n" + answer + "\n")
+        try:
+            results = search(user_input, k=5)
+            context = format_context(results)
+
+            answer = generate_answer(user_input, context)
+
+            print("Bot:\n" + answer + "\n")
+
+        except Exception as error:
+            print(f"Error: {error}\n")
 
 
 if __name__ == "__main__":
